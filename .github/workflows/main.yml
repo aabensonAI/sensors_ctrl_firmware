@@ -1,0 +1,103 @@
+name: Build and Upload ESP32 Firmware (PlatformIO)
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+env:
+  FIRMWARE_FILENAME: moto_ctrl_firmware_${{ github.ref_name }}.bin
+  FIRMWARE_PATH: firmware/moto_ctrl_firmware_${{ github.ref_name }}.bin
+  # FIRMWARE_URL: https://github.com/${{ github.repository }}/releases/download/${{ github.ref_name }}/moto_ctrl_firmware_${{ github.ref_name }}.bin
+
+jobs:
+  build-release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 📥 Checkout code
+        uses: actions/checkout@v3
+
+      - name: 🛠 Install PlatformIO
+        run: pip install platformio
+
+      - name: 🔨 Compile firmware with PlatformIO
+        run: pio run
+
+      - name: 📦 Rename and move firmware binary
+        run: |
+          mkdir -p firmware
+          cp .pio/build/esp32dev/firmware.bin ${{ env.FIRMWARE_PATH }}
+
+      - name: ☁️ Upload firmware to Supabase Storage
+        shell: bash
+        run: |
+          echo "☁️ Uploading to Supabase Storage..."
+          FILENAME=${{ env.FIRMWARE_FILENAME }}
+          BUCKET_NAME=moto-controller-firmware-updates  # Replace with your bucket name
+          STORAGE_UPLOAD_URL="https://vdoohbjzydtvaqpqsngz.supabase.co/storage/v1/object/$BUCKET_NAME/$FILENAME"
+  
+          curl -X PUT "$STORAGE_UPLOAD_URL" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary @"${{ env.FIRMWARE_PATH }}"
+
+
+      - name: 🔐 Generate signed firmware URL and store in Supabase table
+        shell: bash
+        run: |
+          echo "🔐 Generating signed URL for firmware..."
+  
+          BUCKET="moto-controller-firmware-updates"
+          FILENAME=${{ env.FIRMWARE_FILENAME }}
+  
+          # Step 1: Request signed URL from Supabase
+          SIGNED_URL=$(curl -s -X POST "${{ secrets.SUPABASE_URL }}storage/v1/object/sign/${BUCKET}/${FILENAME}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Content-Type: application/json" \
+            -d '{"expiresIn": 31536000}')
+  
+          FULL_URL="${{ secrets.SUPABASE_URL }}${SIGNED_URL}"
+  
+          echo "Signed URL: $FULL_URL"
+  
+          # Step 2: Store it in your Supabase table
+           curl -X POST "${{ secrets.SUPABASE_URL }}/rest/v1/rpc/upsert_moto_ctrl_firmware_version" \
+            -H "apikey: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Authorization: Bearer ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}" \
+            -H "Content-Type: application/json" \
+            -H "Prefer: return=representation" \
+            -d "$(jq -n \
+                --arg version "${{ github.ref_name }}" \
+                --arg url "$FULL_URL" \
+                --arg email "${{ secrets.SUPABASE_ADMIN_EMAIL }}" \
+                '{p_version: $version, p_firmware_url: $url, p_created_by: $email}')"
+
+      # - name: 🚀 Upload to GitHub Releases
+      #   uses: softprops/action-gh-release@v1
+      #   with:
+      #     files: ${{ env.FIRMWARE_PATH }}
+      #   env:
+      #     GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # - name: 🔄 Update Supabase with firmware version and URL
+      #   shell: bash
+      #   run: |
+      #     echo "📡 Posting to Supabase endpoint..."
+      #     echo "Endpoint: ${{ secrets.SUPABASE_URL }}"
+      #     echo "Version: ${{ github.ref_name }}"
+      #     echo "Firmware URL: ${{ env.FIRMWARE_URL }}"
+
+      #     curl -X POST "${{ secrets.SUPABASE_URL }}" \
+      #       -H "apikey: ${{ secrets.SUPABASE_API_KEY }}" \
+      #       -H "Authorization: Bearer ${{ secrets.SUPABASE_API_KEY }}" \
+      #       -H "Content-Type: application/json" \
+      #       -d "$(jq -n \
+      #         --arg version "${{ github.ref_name }}" \
+      #         --arg url "${{ env.FIRMWARE_URL }}" \
+      #         '{p_version: $version, p_firmware_url: $url}')"
